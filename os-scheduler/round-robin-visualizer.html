@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Round Robin 스케줄러 시각화</title>
+  <style>
+    :root { color-scheme: dark; --bg:#08111f; --panel:#111d30; --line:#2b3d56; --text:#edf4ff; --muted:#91a4bd; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; font-family:system-ui,-apple-system,sans-serif; background:radial-gradient(circle at top,#172943,var(--bg) 55%); color:var(--text); }
+    main { width:min(1100px,94vw); margin:auto; padding:34px 0 60px; }
+    h1 { margin:0 0 5px; font-size:clamp(28px,4vw,46px); }
+    .sub { margin:0 0 24px; color:var(--muted); }
+    .controls,.stats { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin:14px 0; }
+    button { border:1px solid #49617e; border-radius:10px; padding:10px 17px; color:var(--text); background:#1c304a; font-weight:700; cursor:pointer; }
+    button:hover { background:#284462; }
+    button.primary { background:#2463eb; border-color:#3e7aff; }
+    label { color:var(--muted); margin-left:8px; }
+    input[type=range] { vertical-align:middle; }
+    .stage { position:relative; min-height:315px; display:grid; grid-template-columns:1.5fr .8fr 1fr; gap:28px; align-items:center; padding:30px; border:1px solid var(--line); border-radius:20px; background:rgba(17,29,48,.88); overflow:hidden; }
+    .zone { height:210px; padding:18px; border:2px dashed #405775; border-radius:17px; background:#0b1728; }
+    .zone h2 { margin:0 0 18px; color:#a9bdd7; font-size:17px; letter-spacing:.04em; }
+    .queue { display:flex; gap:12px; min-height:82px; align-items:center; }
+    .cpu { display:grid; place-items:center; border-style:solid; box-shadow:inset 0 0 35px #07101d; }
+    .cpu-core { font-size:44px; font-weight:900; color:#58708e; }
+    .finished { display:flex; gap:9px; flex-wrap:wrap; align-content:flex-start; }
+    .process { width:68px; height:68px; display:grid; place-items:center; border-radius:15px; font-size:22px; font-weight:900; box-shadow:0 10px 22px #0008; transition:transform .45s ease,opacity .45s ease; }
+    .p1 { background:#2979ff; } .p2 { background:#f59e0b; } .p3 { background:#22a95b; }
+    .running { animation:pulse .75s infinite alternate; }
+    @keyframes pulse { to { transform:scale(1.12); box-shadow:0 0 28px currentColor; } }
+    .clock { font-size:19px; font-weight:800; padding:9px 13px; border-radius:10px; background:#0b1728; border:1px solid var(--line); }
+    .event { flex:1; min-width:260px; color:#c9d9ed; }
+    .timeline { display:flex; margin-top:18px; min-height:76px; border:1px solid var(--line); border-radius:13px; overflow:hidden; background:#0b1728; }
+    .slice { display:grid; place-items:center; min-width:70px; padding:8px; font-weight:900; opacity:0; transform:translateY(15px); animation:appear .35s forwards; border-right:2px solid #08111f; }
+    @keyframes appear { to { opacity:1; transform:none; } }
+    table { width:100%; margin-top:18px; border-collapse:collapse; background:rgba(17,29,48,.8); }
+    th,td { padding:11px; border-bottom:1px solid var(--line); text-align:center; }
+    th { color:#9eb2cb; }
+    .legend { color:var(--muted); font-size:14px; margin-top:12px; }
+    @media(max-width:760px) { .stage { grid-template-columns:1fr; } .zone { height:145px; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Round Robin 스케줄러</h1>
+  <p class="sub">Quantum 2 · P1(도착 0, 실행 5), P2(도착 1, 실행 3), P3(도착 2, 실행 1)</p>
+
+  <div class="controls">
+    <button class="primary" id="play">▶ 재생</button>
+    <button id="step">한 단계</button>
+    <button id="reset">처음부터</button>
+    <label>속도 <input id="speed" type="range" min="350" max="1800" value="1000" step="50"></label>
+  </div>
+
+  <section class="stage">
+    <div class="zone"><h2>READY QUEUE · 맨 앞 →</h2><div id="queue" class="queue"></div></div>
+    <div class="zone cpu"><h2>CPU</h2><div id="cpu" class="cpu-core">비어 있음</div></div>
+    <div class="zone"><h2>TERMINATED</h2><div id="finished" class="finished"></div></div>
+  </section>
+
+  <div class="stats"><span id="clock" class="clock">시간 0</span><span id="event" class="event">P1이 도착해 Ready Queue에 들어갑니다.</span></div>
+  <div id="timeline" class="timeline"></div>
+  <table>
+    <thead><tr><th>PID</th><th>상태(PCB)</th><th>남은 CPU 시간</th><th>대기 시간</th><th>반환 시간</th></tr></thead>
+    <tbody id="pcb"></tbody>
+  </table>
+  <p class="legend">핵심: CPU 작업이 끝나면 종료하고, Quantum만 끝났다면 Ready Queue의 맨 뒤로 돌아갑니다.</p>
+</main>
+<script>
+  const specs = [
+    { pid:'P1', arrival:0, burst:5, css:'p1' },
+    { pid:'P2', arrival:1, burst:3, css:'p2' },
+    { pid:'P3', arrival:2, burst:1, css:'p3' }
+  ];
+  const quantum = 2;
+  let state, steps, index, timer;
+
+  function makeSteps() {
+    const ps = specs.map(p => ({...p, remaining:p.burst, state:'NEW', completion:null}));
+    const pending = [...ps], ready = [], result = [];
+    let time = 0;
+    const snapshot = (event, running=null, slice=null) => result.push({time,event,running,slice,ready:ready.map(p=>p.pid),processes:ps.map(p=>({...p}))});
+    const arrive = () => {
+      const arrived=[];
+      while (pending.length && pending[0].arrival <= time) { const p=pending.shift(); p.state='READY'; ready.push(p); arrived.push(p.pid); }
+      return arrived;
+    };
+    arrive(); snapshot('P1이 도착해 Ready Queue에 들어갑니다.');
+    while (pending.length || ready.length) {
+      if (!ready.length) { time=pending[0].arrival; const a=arrive(); snapshot(`${a.join(', ')} 도착`); }
+      const current=ready.shift(); current.state='RUNNING';
+      snapshot(`${current.pid}: READY → RUNNING`, current.pid);
+      const start=time, duration=Math.min(quantum,current.remaining); time+=duration; current.remaining-=duration;
+      const arrived=arrive();
+      const slice={pid:current.pid,start,end:time,css:current.css};
+      if (current.remaining===0) { current.state='TERMINATED'; current.completion=time; snapshot(`${current.pid} 작업 완료 → TERMINATED${arrived.length ? ` · ${arrived.join(', ')} 도착` : ''}`,null,slice); }
+      else { current.state='READY'; ready.push(current); snapshot(`${current.pid} Quantum 만료 → Queue 맨 뒤${arrived.length ? ` · ${arrived.join(', ')} 도착` : ''}`,null,slice); }
+    }
+    return result;
+  }
+
+  function card(pid, running=false) {
+    const p=specs.find(x=>x.pid===pid); return `<div class="process ${p.css} ${running?'running':''}">${pid}</div>`;
+  }
+  function render() {
+    state=steps[index];
+    document.querySelector('#queue').innerHTML=state.ready.map(pid=>card(pid)).join('');
+    document.querySelector('#cpu').innerHTML=state.running ? card(state.running,true) : '비어 있음';
+    document.querySelector('#finished').innerHTML=state.processes.filter(p=>p.state==='TERMINATED').map(p=>card(p.pid)).join('');
+    document.querySelector('#clock').textContent=`시간 ${state.time}`;
+    document.querySelector('#event').textContent=state.event;
+    document.querySelector('#pcb').innerHTML=state.processes.map(p=>`<tr><td>${p.pid}</td><td>${p.state}</td><td>${p.remaining}</td><td>${p.completion===null?'—':p.completion-p.arrival-p.burst}</td><td>${p.completion===null?'—':p.completion-p.arrival}</td></tr>`).join('');
+    const slices=steps.slice(0,index+1).filter(s=>s.slice).map(s=>s.slice);
+    document.querySelector('#timeline').innerHTML=slices.map(s=>`<div class="slice ${s.css}" style="flex:${s.end-s.start}">${s.start}–${s.end}<br>${s.pid}</div>`).join('');
+    if (index===steps.length-1) stop();
+  }
+  function next() { if (index < steps.length-1) { index++; render(); } }
+  function play() {
+    if (timer) { stop(); return; }
+    if (index===steps.length-1) reset();
+    document.querySelector('#play').textContent='⏸ 일시정지';
+    timer=setInterval(next, 2150-Number(document.querySelector('#speed').value));
+  }
+  function stop() { clearInterval(timer); timer=null; document.querySelector('#play').textContent='▶ 재생'; }
+  function reset() { stop(); steps=makeSteps(); index=0; document.querySelector('#timeline').innerHTML=''; render(); }
+  document.querySelector('#play').onclick=play;
+  document.querySelector('#step').onclick=()=>{ stop(); next(); };
+  document.querySelector('#reset').onclick=reset;
+  document.querySelector('#speed').oninput=()=>{ if(timer){ stop(); play(); } };
+  reset();
+</script>
+</body>
+</html>
