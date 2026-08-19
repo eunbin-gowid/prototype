@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mini Kernel 시각화</title>
+  <style>
+    :root { color-scheme: dark; --bg:#08111f; --panel:#111d30; --line:#2b3d56; --text:#edf4ff; --muted:#91a4bd; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:radial-gradient(circle at top,#172943,var(--bg) 58%); color:var(--text); font-family:system-ui,-apple-system,sans-serif; }
+    main { width:min(1180px,94vw); margin:auto; padding:30px 0 60px; }
+    h1 { margin:0 0 6px; font-size:clamp(28px,4vw,46px); }
+    .sub { margin:0 0 22px; color:var(--muted); }
+    .controls { display:flex; gap:9px; align-items:center; flex-wrap:wrap; margin:14px 0; }
+    button { border:1px solid #49617e; border-radius:10px; padding:10px 15px; color:var(--text); background:#1c304a; font-weight:800; cursor:pointer; }
+    button:hover { background:#284462; } button.primary { background:#2463eb; border-color:#3e7aff; }
+    label { display:inline-flex; align-items:center; gap:8px; color:var(--muted); font-size:14px; font-weight:700; }
+    select, input[type=number] { appearance:none; border:1px solid #49617e; border-radius:9px; padding:9px 34px 9px 12px; color:var(--text); background:#0d1b2e; font:inherit; font-weight:800; outline:none; transition:border-color .2s, box-shadow .2s; }
+    select { background-image:linear-gradient(45deg,transparent 50%,#9eb4ce 50%),linear-gradient(135deg,#9eb4ce 50%,transparent 50%); background-position:calc(100% - 15px) 14px,calc(100% - 10px) 14px; background-size:5px 5px,5px 5px; background-repeat:no-repeat; cursor:pointer; }
+    input[type=number] { width:62px !important; padding-right:9px; }
+    select:hover, input[type=number]:hover { border-color:#6d8fb8; }
+    select:focus, input[type=number]:focus { border-color:#5e91ff; box-shadow:0 0 0 3px #2563eb44; }
+    select option { color:#edf4ff; background:#0d1b2e; }
+    .clock { margin-left:auto; padding:9px 14px; border:1px solid var(--line); border-radius:10px; font-weight:900; }
+    .stage { display:grid; grid-template-columns:1.2fr .85fr 1fr 1fr; gap:14px; padding:18px; border:1px solid var(--line); border-radius:18px; background:rgba(17,29,48,.9); }
+    .zone { min-height:190px; padding:14px; border:2px dashed #405775; border-radius:15px; background:#0b1728; }
+    .zone h2 { margin:0 0 14px; color:#a9bdd7; font-size:15px; letter-spacing:.04em; }
+    .queue, .cards { display:flex; flex-wrap:wrap; gap:9px; align-content:flex-start; }
+    .card { width:67px; height:67px; display:grid; place-items:center; border-radius:14px; font-weight:950; font-size:21px; box-shadow:0 9px 18px #0008; transition:.3s; }
+    .p1 { background:#2878ed; } .p2 { background:#ed9415; } .p3 { background:#21a35b; }
+    .running { animation:pulse .65s infinite alternate; outline:3px solid #ffd166; }
+    @keyframes pulse { to { transform:scale(1.1); box-shadow:0 0 28px #ffd166; } }
+    .empty { color:#526984; font-size:14px; }
+    .event { margin:14px 0; padding:13px 15px; min-height:50px; border-left:4px solid #ffd166; background:#111f33; font-size:16px; }
+    .timeline { display:flex; min-height:70px; overflow:hidden; border:1px solid var(--line); border-radius:12px; background:#091524; }
+    .slice { flex:1; min-width:48px; display:grid; place-items:center; border-right:1px solid #08111f; font-size:13px; font-weight:900; animation:appear .25s both; }
+    @keyframes appear { from { opacity:0; transform:translateY(12px); } }
+    .log { max-height:180px; overflow:auto; margin-top:14px; padding:12px 15px; border:1px solid var(--line); border-radius:12px; background:#091524; color:#b8cbe1; font:13px ui-monospace,SFMono-Regular,monospace; line-height:1.7; }
+    .explain { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:14px; }
+    .explain div { padding:13px; border:1px solid var(--line); border-radius:12px; color:var(--muted); background:#0c1829; }
+    .explain b { color:#8ed1ff; }
+    @media(max-width:850px) { .stage { grid-template-columns:1fr 1fr; } .clock { margin-left:0; } }
+    @media(max-width:560px) { .stage,.explain { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Mini Kernel</h1>
+  <p class="sub">프로세스는 전체 실행 시간을 커널에 알려주지 않습니다. 한 tick 실행한 뒤 신호를 반환합니다.</p>
+
+  <div class="controls">
+    <label>정책
+      <select id="policy"><option value="rr">Round Robin</option><option value="fcfs">FCFS</option></select>
+    </label>
+    <label>quantum <input id="quantum" type="number" min="1" value="2" style="width:55px"></label>
+    <button class="primary" id="spawnP1">P1 생성</button>
+    <button id="spawnP2">P2 생성</button>
+    <button id="spawnP3">P3 생성</button>
+    <button id="tick">CPU 한 tick</button>
+    <button id="play">▶ 자동 실행</button>
+    <button id="reset">처음부터</button>
+    <span class="clock" id="clock">t = 0</span>
+  </div>
+
+  <section class="stage">
+    <div class="zone"><h2>READY QUEUE</h2><div id="ready" class="queue"></div></div>
+    <div class="zone"><h2 id="cpuTitle">CPU · Round Robin · quantum 2</h2><div id="cpu" class="cards"></div></div>
+    <div class="zone"><h2>WAITING · I/O</h2><div id="waiting" class="cards"></div></div>
+    <div class="zone"><h2>TERMINATED</h2><div id="terminated" class="cards"></div></div>
+  </section>
+
+  <div id="event" class="event">프로세스를 생성하면 커널이 Ready Queue에 넣습니다.</div>
+  <div id="timeline" class="timeline"></div>
+  <div id="log" class="log">이벤트 로그가 여기에 표시됩니다.</div>
+  <section class="explain">
+    <div><b>spawn()</b><br>외부에서 프로세스를 생성합니다.</div>
+    <div><b>ProcessSignal</b><br>Continue, WaitForIo, Exit 중 하나를 반환합니다.</div>
+    <div><b>MiniKernel</b><br>신호를 보고 READY, RUNNING, WAITING, TERMINATED를 바꿉니다.</div>
+  </section>
+</main>
+<script>
+  const programs = {
+    P1: ['Continue','Continue','WaitForIo:3','Continue','Exit'],
+    P2: ['Continue','Continue','Continue','Exit'],
+    P3: ['Continue','Exit']
+  };
+  const css = {P1:'p1',P2:'p2',P3:'p3'};
+  let state, timer;
+
+  function config() {
+    return {policy:document.querySelector('#policy').value, quantum:Math.max(1,Number(document.querySelector('#quantum').value)||1)};
+  }
+  function resetState() {
+    stop();
+    const c=config(); state = { clock:0, policy:c.policy, quantum:c.quantum, ready:[], current:null, remainingSlice:0, waiting:[], terminated:[], processes:{}, timeline:[], events:[], nextPid:1 };
+    render();
+  }
+  function addEvent(type, pid, message) {
+    const actor = {
+      SPAWN:'외부 호출자 → MiniKernel',
+      DISPATCH:'SchedulerPolicy → MiniKernel',
+      RUN:'CPU → ProcessProgram',
+      PREEMPT:'MiniKernel',
+      IO_WAIT:'ProcessProgram → MiniKernel',
+      WAKE_UP:'MiniKernel',
+      COMPLETE:'ProcessProgram → MiniKernel',
+      IDLE:'MiniKernel'
+    }[type] || 'MiniKernel';
+    state.events.push({time:state.clock,type,pid,message,actor});
+    document.querySelector('#event').textContent = message;
+  }
+  function spawn(pid) {
+    if (state.processes[pid]) return;
+    state.processes[pid] = {pid, steps:[...programs[pid]], state:'READY', wakeAt:null};
+    state.ready.push(pid);
+    addEvent('SPAWN',pid,`${pid}가 생성되어 READY가 됩니다.`);
+    render();
+  }
+  function wake() {
+    const due=state.waiting.filter(x=>x.wakeAt<=state.clock);
+    state.waiting=state.waiting.filter(x=>x.wakeAt>state.clock);
+    due.forEach(x=>{x.state='READY';x.wakeAt=null;state.ready.push(x.pid);addEvent('WAKE_UP',x.pid,`${x.pid}: WAITING → READY (I/O 완료)`);});
+  }
+  function dispatch() {
+    if (state.current || !state.ready.length) return;
+    const pid=state.policy==='rr'?state.ready.shift():state.ready.shift(), p=state.processes[pid];
+    p.state='RUNNING'; state.current=pid; state.remainingSlice=state.policy==='rr'?state.quantum:Infinity;
+    addEvent('DISPATCH',pid,`${pid}: READY → RUNNING`);
+  }
+  function record(pid,start,end) {
+    const last=state.timeline.at(-1);
+    if(last&&last.pid===pid&&last.end===start) last.end=end; else state.timeline.push({pid,start,end});
+  }
+  function step() {
+    wake();
+    if (!state.current && !state.ready.length) {
+      if (!state.waiting.length) { addEvent('IDLE',null,'실행 가능한 프로세스가 없습니다.'); render(); return false; }
+      const next=Math.min(...state.waiting.map(x=>x.wakeAt));
+      addEvent('IDLE',null,`CPU가 t=${next}까지 쉽니다.`); state.clock=next; wake();
+    }
+    dispatch();
+    if(!state.current){ render(); return false; }
+    const pid=state.current,p=state.processes[pid],start=state.clock,signal=p.steps.shift();
+    state.clock++; state.remainingSlice--; record(pid,start,state.clock);
+    addEvent('RUN',pid,`${pid}가 1 tick 실행했습니다. 결과: ${signal}`);
+    if(signal==='Continue') {
+      if(state.remainingSlice===0){p.state='READY';state.ready.push(pid);state.current=null;addEvent('PREEMPT',pid,`${pid}: quantum 만료, RUNNING → READY`);}
+    } else if(signal.startsWith('WaitForIo')) {
+      const ticks=Number(signal.split(':')[1]);p.state='WAITING';p.wakeAt=state.clock+ticks;state.waiting.push(p);state.current=null;addEvent('IO_WAIT',pid,`${pid}: RUNNING → WAITING (${ticks} tick)`);
+    } else {
+      p.state='TERMINATED';state.terminated.push(pid);state.current=null;addEvent('COMPLETE',pid,`${pid}: RUNNING → TERMINATED`);
+    }
+    render();
+    return true;
+  }
+  function card(pid,running=false){return `<div class="card ${css[pid]} ${running?'running':''}">${pid}</div>`}
+  function cards(list,running=false){return list.length?list.map(pid=>card(pid,running&&pid===state.current)).join(''):'<span class="empty">비어 있음</span>'}
+  function render(){
+    document.querySelector('#clock').textContent=`t = ${state.clock}`;
+    document.querySelector('#cpuTitle').textContent=state.policy==='rr'?`CPU · Round Robin · quantum ${state.quantum}`:'CPU · FCFS';
+    document.querySelector('#ready').innerHTML=cards(state.ready);
+    document.querySelector('#cpu').innerHTML=state.current?card(state.current,true):'<span class="empty">비어 있음</span>';
+    document.querySelector('#waiting').innerHTML=state.waiting.length?state.waiting.map(x=>`${card(x.pid)}<small style="color:#91a4bd">wake t=${x.wakeAt}</small>`).join(''):'<span class="empty">비어 있음</span>';
+    document.querySelector('#terminated').innerHTML=cards(state.terminated);
+    document.querySelector('#timeline').innerHTML=state.timeline.map(x=>`<div class="slice ${css[x.pid]}" style="flex:${x.end-x.start}">${x.start}–${x.end}<br>${x.pid}</div>`).join('');
+    document.querySelector('#log').innerHTML=state.events.slice(-12).map(x=>`[t=${x.time}] <span style="color:#8ed1ff">${x.actor}</span> · ${x.type}${x.pid?` ${x.pid}`:''}: ${x.message}`).join('<br>')||'이벤트 로그가 여기에 표시됩니다.';
+  }
+  function play(){if(timer){stop();return}document.querySelector('#play').textContent='⏸ 일시정지';timer=setInterval(()=>{if(!step())stop()},850)}
+  function stop(){clearInterval(timer);timer=null;document.querySelector('#play').textContent='▶ 자동 실행'}
+  document.querySelector('#spawnP1').onclick=()=>spawn('P1'); document.querySelector('#spawnP2').onclick=()=>spawn('P2'); document.querySelector('#spawnP3').onclick=()=>spawn('P3');
+  document.querySelector('#policy').onchange=resetState; document.querySelector('#quantum').onchange=resetState;
+  document.querySelector('#tick').onclick=()=>{stop();step()}; document.querySelector('#play').onclick=play; document.querySelector('#reset').onclick=resetState; resetState();
+</script>
+</body>
+</html>
